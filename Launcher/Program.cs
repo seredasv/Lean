@@ -17,6 +17,7 @@
 using System;
 using System.ComponentModel.Composition;
 using System.Threading;
+using System.Windows.Forms;
 using QuantConnect.Configuration;
 using QuantConnect.Lean.Engine;
 using QuantConnect.Logging;
@@ -29,19 +30,32 @@ namespace QuantConnect.Lean.Launcher
     {
         private const string _collapseMessage = "Unhandled exception breaking past controls and causing collapse of algorithm node. This is likely a memory leak of an external dependency or the underlying OS terminating the LEAN engine.";
 
+        static void RunLeanEngineWinForm()
+        {
+            Application.Run(new Views.WinForms.LeanEngineWinForm());
+        }
+
         static void Main(string[] args)
         {
-            Log.LogHandler = Composer.Instance.GetExportedValueByTypeName<ILogHandler>(Config.Get("log-handler", "CompositeLogHandler"));
-
             //Initialize:
             string mode = "RELEASE";
-            var liveMode = Config.GetBool("live-mode");
-            Log.DebuggingEnabled = Config.GetBool("debug-mode");
-
 #if DEBUG
             mode = "DEBUG";
 #endif
+            if (Config.Get("environment") == "backtesting-desktop")
+            {
+                Application.EnableVisualStyles();
+                Thread thread = new Thread(RunLeanEngineWinForm);
+                thread.SetApartmentState(ApartmentState.STA);
+                thread.Start();
+                thread.Join(); 
+            }
+            else
+            {
+                Log.LogHandler = Composer.Instance.GetExportedValueByTypeName<ILogHandler>(Config.Get("log-handler", "CompositeLogHandler"));
 
+                var liveMode = Config.GetBool("live-mode");
+                Log.DebuggingEnabled = Config.GetBool("debug-mode");
             //Name thread for the profiler:
             Thread.CurrentThread.Name = "Algorithm Analysis Thread";
             Log.Trace("Engine.Main(): LEAN ALGORITHMIC TRADING ENGINE v" + Globals.Version + " Mode: " + mode);
@@ -124,6 +138,8 @@ namespace QuantConnect.Lean.Launcher
                 leanEngineAlgorithmHandlers.Dispose();
                 Log.LogHandler.Dispose();
             }
+            }
+
         }
     }
 }

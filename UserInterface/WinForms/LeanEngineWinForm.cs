@@ -18,39 +18,57 @@ using System;
 using System.Drawing;
 using System.Threading;
 using System.Windows.Forms;
+using Gecko;
 using QuantConnect.Configuration;
 using QuantConnect.Lean.Engine;
 using QuantConnect.Lean.Engine.Results;
+using QuantConnect.Logging;
+using QuantConnect.Messaging;
 using QuantConnect.Packets;
 using QuantConnect.Util;
+using QuantConnect.Views.Model;
+using QuantConnect.Views.Presenter;
+using QuantConnect.Views.View;
 using Timer = System.Windows.Forms.Timer;
 
 namespace QuantConnect.Views.WinForms
 {
     /// <summary>
-    /// Primary Form for use with LEAN:
+    ///     Primary Form for use with LEAN:
     /// </summary>
-    public partial class LeanEngineWinForm : Form
+    public class LeanEngineWinForm : Form, ILeanEngineWinFormView
     {
-        private readonly Engine _engine;
-        //Form Controls:
-        private RichTextBox _console;
-
-        //Form Business Logic:
-        private Timer _polling;
-        private IResultHandler _resultsHandler;
-        private bool _isComplete = false;
         private static Thread _leanEngineThread;
+        public GeckoWebBrowser Browser;
+        //Setup Configuration:
+        public static string IconPath = "../../Icons/";
 
+        //Form Elements
+        private GroupBox LogGroupBox;
+        private RichTextBox TextBoxLog;
+        private MenuStrip MenuStrip;
+        private ToolStripMenuItem FileMenuItem;
+        private ToolStripMenuItem ExitMenuItem;
+        private StatusStrip FormStatusStrip;
+        private ToolStripStatusLabel FormToolStripStatusLabel;
+        private ToolStripStatusLabel FormToolStripStatusStringLabel;
+        private ToolStripStatusLabel StatisticsToolStripStatusLabel;
+        private ToolStripProgressBar FormToolStripProgressBar;
+        private ToolStripContainer toolStripContainer1;
+        private LeanEngineWinFormPresenter _presenter;
+        
         /// <summary>
-        /// Launch the Lean Engine Primary Form:
+        ///     Launch the Lean Engine Primary Form:
         /// </summary>
-        /// <param name="engine">Accept the engine instance we just launched</param>
-        public LeanEngineWinForm(Engine engine)
+        public LeanEngineWinForm()
         {
-            _engine = engine;
-            //Setup the State:
-            _resultsHandler = engine.AlgorithmHandlers.Results;
+            Config.Set("messaging-handler", "QuantConnect.Messaging.EventMessagingHandler");
+            var systemHandler = LeanEngineSystemHandlers.FromConfiguration(Composer.Instance);
+            var messageHandler = (EventMessagingHandler)systemHandler.Notify;
+            var model = new LeanEngineWinFormModel();
+            _presenter = new LeanEngineWinFormPresenter(this, model, messageHandler);
+
+            InitializeComponent();
 
             //Create Form:
             Text = "QuantConnect Lean Algorithmic Trading Engine: v" + Globals.Version;
@@ -61,63 +79,106 @@ namespace QuantConnect.Views.WinForms
             Icon = new Icon("../../../lean.ico");
 
             //Setup Console Log Area:
-            _console = new RichTextBox();
-            _console.Parent = this;
-            _console.ReadOnly = true;
-            _console.Multiline = true;
-            _console.Location = new Point(0, 0);
-            _console.Dock = DockStyle.Fill;
-            _console.KeyUp += ConsoleOnKeyUp;
+            TextBoxLog.Parent = LogGroupBox;
             
-            //Form Events:
-            Closed += OnClosed;
+            Log.LogHandler = new RichTextBoxLogHandler(TextBoxLog);
+            TextBoxLog.KeyUp += ConsoleOnKeyUp;
 
-            //Setup Polling Events:
-            _polling = new Timer();
-            _polling.Interval = 1000;
-            _polling.Tick += PollingOnTick;
-            _polling.Start();
+            ResumeLayout(false);
+
+            //Form Events:
+            Closed += ExitApplication;
+
+            //Trigger a timer event.
+            _timer = new Timer { Interval = 1000 };
+            _timer.Tick += TickerTick;
+
+            Browser = new GeckoWebBrowser { Dock = DockStyle.Fill, Name = "browser" };
+            toolStripContainer1.ContentPanel.Controls.Add(Browser);
+
+            //Setup Container Events:
+            Load += OnLoad;
+        }
+
+        /// <returns>
+        /// The text associated with this control.
+        /// </returns>
+        public override sealed string Text
+        {
+            get { return base.Text; }
+            set { base.Text = value; }
+        }
+
+        public Engine Engine { get; private set; }
+        public LeanEngineSystemHandlers EngineSystemHandlers { get; set; }
+
+        //Form Controls:
+        public IResultHandler ResultsHandler { get; set; }
+        public event EventHandler TickerTick;
+        public event EventHandler ExitApplication;
+        public event KeyEventHandler ConsoleOnKeyUp;
+
+        public void OnPropertyChanged(LeanEngineWinFormModel model)
+        {
+            StatisticsToolStripStatusLabel.Text = model.StatusStripStatisticsText;
+        }
+        
+        private void Exit(object sender, EventArgs eventArgs)
+        {
+            ExitApplication(sender, eventArgs);
         }
 
         /// <summary>
-        /// Launch the Desktop Interface
+        ///     Initialization events on loading the container
+        /// </summary>
+        private void OnLoad(object sender, EventArgs eventArgs)
+        {
+            //Start Stats Counter:
+            _timer.Start();
+
+            //Complete load
+            FormToolStripStatusLabel.Text = @"LEAN Desktop v" + Globals.Version + @" Load Complete.";
+
+            //Load the Lean Engine
+            Engine = LaunchLean();
+        }
+
+        /// <summary>
+        ///     Launch the Desktop Interface
         /// </summary>
         /// <remarks>
         ///     This is a preliminary implementation of a UX for the Lean Engine. It is not considered complete or 
         ///     production ready but is committed so the open source community can begin experimenting with custom UIs!
         /// </remarks>
-        static public void Main()
+        public static void Main()
         {
-            string algorithm = "BasicTemplateAlgorithm";
+            const string algorithm = "BasicTemplateAlgorithm";
 
-            Console.WriteLine("Running " + algorithm + "...");
+            Console.WriteLine(@"Running " + algorithm + @"...");
 
             // Setup the configuration, since the UX is not in the 
             // lean directory we write a new config in the UX output directory.
-            // TODO > Most of this should be configured through a helper form in the UX.
             Config.Set("algorithm-type-name", algorithm);
             Config.Set("live-mode", "false");
-            Config.Set("messaging-handler", "QuantConnect.Messaging.Messaging");
+            Config.Set("messaging-handler", "QuantConnect.Messaging.EventMessagingHandler");
             Config.Set("job-queue-handler", "QuantConnect.Queues.JobQueue");
             Config.Set("api-handler", "QuantConnect.Api.Api");
             Config.Set("result-handler", "QuantConnect.Lean.Engine.Results.DesktopResultHandler");
             Config.Set("environment", "desktop");
 
             //Start default backtest.
-            var engine = LaunchLean();
 
             //Start GUI
-            // steal the desktop result handler from the composer's instance
-            Application.Run(new LeanEngineWinForm(engine));
+            Application.Run(new LeanEngineWinForm());
+
         }
 
         /// <summary>
-        /// Launch the LEAN Engine in a separate thread.
+        ///     Launch the LEAN Engine in a separate thread.
         /// </summary>
-        private static Engine LaunchLean()
+        public static Engine LaunchLean()
         {
             //Launch the Lean Engine in another thread: this will run the algorithm specified above.
-            // TODO > This should only be launched when clicking a backtest/trade live button provided in the UX.
 
             var systemHandlers = LeanEngineSystemHandlers.FromConfiguration(Composer.Instance);
             var algorithmHandlers = LeanEngineAlgorithmHandlers.FromConfiguration(Composer.Instance);
@@ -134,74 +195,160 @@ namespace QuantConnect.Views.WinForms
             return engine;
         }
 
-        /// <summary>
-        /// Primary polling thread for the logging and chart display.
-        /// </summary>
-        /// <param name="sender"></param>
-        /// <param name="eventArgs"></param>
-        private void PollingOnTick(object sender, EventArgs eventArgs)
+        #region FormElementDeclarations
+
+        //Timer;
+        private readonly Timer _timer;
+
+        #endregion
+
+        private void InitializeComponent()
         {
-            Packet message;
-            if (_resultsHandler == null) return;
-            while (_resultsHandler.Messages.TryDequeue(out message))
-            {
-                //Process the packet request:
-                switch (message.Type)
-                {
-                    case PacketType.BacktestResult:
-                        //Draw chart
-                        break;
+            System.ComponentModel.ComponentResourceManager resources = new System.ComponentModel.ComponentResourceManager(typeof(LeanEngineWinForm));
+            this.LogGroupBox = new System.Windows.Forms.GroupBox();
+            this.FormStatusStrip = new System.Windows.Forms.StatusStrip();
+            this.FormToolStripStatusLabel = new System.Windows.Forms.ToolStripStatusLabel();
+            this.FormToolStripStatusStringLabel = new System.Windows.Forms.ToolStripStatusLabel();
+            this.StatisticsToolStripStatusLabel = new System.Windows.Forms.ToolStripStatusLabel();
+            this.FormToolStripProgressBar = new System.Windows.Forms.ToolStripProgressBar();
+            this.TextBoxLog = new System.Windows.Forms.RichTextBox();
+            this.MenuStrip = new System.Windows.Forms.MenuStrip();
+            this.FileMenuItem = new System.Windows.Forms.ToolStripMenuItem();
+            this.ExitMenuItem = new System.Windows.Forms.ToolStripMenuItem();
+            this.toolStripContainer1 = new System.Windows.Forms.ToolStripContainer();
+            this.LogGroupBox.SuspendLayout();
+            this.FormStatusStrip.SuspendLayout();
+            this.MenuStrip.SuspendLayout();
+            this.toolStripContainer1.SuspendLayout();
+            this.SuspendLayout();
+            // 
+            // LogGroupBox
+            // 
+            this.LogGroupBox.Anchor = ((System.Windows.Forms.AnchorStyles)((((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Bottom) 
+            | System.Windows.Forms.AnchorStyles.Left) 
+            | System.Windows.Forms.AnchorStyles.Right)));
+            this.LogGroupBox.AutoSize = true;
+            this.LogGroupBox.Controls.Add(this.FormStatusStrip);
+            this.LogGroupBox.Controls.Add(this.TextBoxLog);
+            this.LogGroupBox.Location = new System.Drawing.Point(10, 503);
+            this.LogGroupBox.Name = "LogGroupBox";
+            this.LogGroupBox.Size = new System.Drawing.Size(989, 205);
+            this.LogGroupBox.TabIndex = 0;
+            this.LogGroupBox.TabStop = false;
+            this.LogGroupBox.Text = "Log";
+            // 
+            // FormStatusStrip
+            // 
+            this.FormStatusStrip.Items.AddRange(new System.Windows.Forms.ToolStripItem[] {
+            this.FormToolStripStatusLabel,
+            this.FormToolStripStatusStringLabel,
+            this.StatisticsToolStripStatusLabel,
+            this.FormToolStripProgressBar});
+            this.FormStatusStrip.Location = new System.Drawing.Point(3, 180);
+            this.FormStatusStrip.Name = "FormStatusStrip";
+            this.FormStatusStrip.Size = new System.Drawing.Size(983, 22);
+            this.FormStatusStrip.TabIndex = 1;
+            // 
+            // FormToolStripStatusLabel
+            // 
+            this.FormToolStripStatusLabel.Name = "FormToolStripStatusLabel";
+            this.FormToolStripStatusLabel.Size = new System.Drawing.Size(105, 17);
+            this.FormToolStripStatusLabel.Text = "Loading Complete";
+            // 
+            // FormToolStripStatusStringLabel
+            // 
+            this.FormToolStripStatusStringLabel.Name = "FormToolStripStatusStringLabel";
+            this.FormToolStripStatusStringLabel.Size = new System.Drawing.Size(625, 17);
+            this.FormToolStripStatusStringLabel.Spring = true;
+            // 
+            // StatisticsToolStripStatusLabel
+            // 
+            this.StatisticsToolStripStatusLabel.Name = "StatisticsToolStripStatusLabel";
+            this.StatisticsToolStripStatusLabel.Size = new System.Drawing.Size(136, 17);
+            this.StatisticsToolStripStatusLabel.Text = "Statistics: CPU:    Ram:    ";
+            // 
+            // FormToolStripProgressBar
+            // 
+            this.FormToolStripProgressBar.Name = "FormToolStripProgressBar";
+            this.FormToolStripProgressBar.Size = new System.Drawing.Size(100, 16);
+            // 
+            // TextBoxLog
+            // 
+            this.TextBoxLog.Anchor = ((System.Windows.Forms.AnchorStyles)((((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Bottom) 
+            | System.Windows.Forms.AnchorStyles.Left) 
+            | System.Windows.Forms.AnchorStyles.Right)));
+            this.TextBoxLog.Location = new System.Drawing.Point(10, 20);
+            this.TextBoxLog.Name = "TextBoxLog";
+            this.TextBoxLog.ReadOnly = true;
+            this.TextBoxLog.Size = new System.Drawing.Size(965, 166);
+            this.TextBoxLog.TabIndex = 0;
+            this.TextBoxLog.Text = "";
+            // 
+            // MenuStrip
+            // 
+            this.MenuStrip.Items.AddRange(new System.Windows.Forms.ToolStripItem[] {
+            this.FileMenuItem});
+            this.MenuStrip.Location = new System.Drawing.Point(0, 0);
+            this.MenuStrip.Name = "MenuStrip";
+            this.MenuStrip.Size = new System.Drawing.Size(1008, 24);
+            this.MenuStrip.TabIndex = 1;
+            this.MenuStrip.Text = "menuStrip1";
+            // 
+            // FileMenuItem
+            // 
+            this.FileMenuItem.DropDownItems.AddRange(new System.Windows.Forms.ToolStripItem[] {
+            this.ExitMenuItem});
+            this.FileMenuItem.Name = "FileMenuItem";
+            this.FileMenuItem.Size = new System.Drawing.Size(37, 20);
+            this.FileMenuItem.Text = "File";
+            // 
+            // ExitMenuItem
+            // 
+            this.ExitMenuItem.Image = global::QuantConnect.Views.Properties.Resources.application_exit_16;
+            this.ExitMenuItem.Name = "ExitMenuItem";
+            this.ExitMenuItem.Size = new System.Drawing.Size(92, 22);
+            this.ExitMenuItem.Text = "Exit";
+            this.ExitMenuItem.Click += new System.EventHandler(this.Exit);
+            // 
+            // toolStripContainer1
+            // 
+            this.toolStripContainer1.BottomToolStripPanelVisible = false;
+            // 
+            // toolStripContainer1.ContentPanel
+            // 
+            this.toolStripContainer1.ContentPanel.Size = new System.Drawing.Size(1008, 469);
+            this.toolStripContainer1.LeftToolStripPanelVisible = false;
+            this.toolStripContainer1.Location = new System.Drawing.Point(0, 28);
+            this.toolStripContainer1.Name = "toolStripContainer1";
+            this.toolStripContainer1.RightToolStripPanelVisible = false;
+            this.toolStripContainer1.Size = new System.Drawing.Size(1008, 469);
+            this.toolStripContainer1.TabIndex = 2;
+            this.toolStripContainer1.Text = "toolStripContainer1";
+            this.toolStripContainer1.TopToolStripPanelVisible = false;
+            // 
+            // LeanEngineWinForm
+            // 
+            this.ClientSize = new System.Drawing.Size(1008, 729);
+            this.Controls.Add(this.toolStripContainer1);
+            this.Controls.Add(this.LogGroupBox);
+            this.Controls.Add(this.MenuStrip);
+            this.Icon = ((System.Drawing.Icon)(resources.GetObject("$this.Icon")));
+            this.MainMenuStrip = this.MenuStrip;
+            this.MaximumSize = new System.Drawing.Size(1024, 768);
+            this.Name = "LeanEngineWinForm";
+            this.StartPosition = System.Windows.Forms.FormStartPosition.CenterScreen;
+            this.WindowState = System.Windows.Forms.FormWindowState.Maximized;
+            this.LogGroupBox.ResumeLayout(false);
+            this.LogGroupBox.PerformLayout();
+            this.FormStatusStrip.ResumeLayout(false);
+            this.FormStatusStrip.PerformLayout();
+            this.MenuStrip.ResumeLayout(false);
+            this.MenuStrip.PerformLayout();
+            this.toolStripContainer1.ResumeLayout(false);
+            this.toolStripContainer1.PerformLayout();
+            this.ResumeLayout(false);
+            this.PerformLayout();
 
-                    case PacketType.LiveResult:
-                        //Draw streaming chart
-                        break;
-
-                    case PacketType.AlgorithmStatus:
-                        //Algorithm status update
-                        break;
-
-                    case PacketType.RuntimeError:
-                        var runError = message as RuntimeErrorPacket;
-                        if (runError != null) AppendConsole(runError.Message, Color.Red);
-                        break;
-
-                    case PacketType.HandledError:
-                        var handledError = message as HandledErrorPacket;
-                        if (handledError != null) AppendConsole(handledError.Message, Color.Red);
-                        break;
-
-                    case PacketType.Log:
-                        var log = message as LogPacket;
-                        if (log != null) AppendConsole(log.Message);
-                        break;
-
-                    case PacketType.Debug:
-                        var debug = message as DebugPacket;
-                        if (debug != null) AppendConsole(debug.Message);
-                        break;
-
-                    case PacketType.OrderEvent:
-                        //New order event.
-                        break;
-
-                    default:
-                        throw new ArgumentOutOfRangeException();
-                }
-            }
-        }
-
-
-        /// <summary>
-        /// Write to the console in specific font color.
-        /// </summary>
-        /// <param name="message">String to append</param>
-        /// <param name="color">Defaults to black</param>
-        private void AppendConsole(string message, Color color = default(Color))
-        {
-            message = DateTime.Now.ToString("u") + " " + message + Environment.NewLine;
-            //Add to console:
-            _console.AppendText(message, color);
-            _console.Refresh();
         }
     }
 }
